@@ -1246,29 +1246,30 @@ void push_error(char const *fmt, ...) {
     }                                                                                              \
   } while (0)
 #define CALL_EVAL(x)                                                                               \
-  eval(x);                                                                                         \
+  eval_unwrap(x);                                                                                  \
   CHECK_ERROR()
-#define ASSERT_SMB(x) ASSERT_EVAL(x != NULL && x->type == Value::Value_t::SYMBOL);
-#define ASSERT_I32(x) ASSERT_EVAL(x != NULL && x->type == Value::Value_t::I32);
-#define ASSERT_F32(x) ASSERT_EVAL(x != NULL && x->type == Value::Value_t::F32);
-#define ASSERT_ANY(x) ASSERT_EVAL(x != NULL && x->type == Value::Value_t::ANY);
+#define ASSERT_SMB(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::SYMBOL);
+#define ASSERT_I32(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::I32);
+#define ASSERT_F32(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::F32);
+#define ASSERT_ANY(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::ANY);
+
 #define EVAL_SMB(res, id)                                                                          \
-  Value *res = CALL_EVAL(l->get(id));                                                              \
+  Value *res = eval_unwrap(l->get(id));                                                            \
   ASSERT_SMB(res)
 #define EVAL_I32(res, id)                                                                          \
-  Value *res = CALL_EVAL(l->get(id));                                                              \
+  Value *res = eval_unwrap(l->get(id));                                                            \
   ASSERT_I32(res)
 #define EVAL_F32(res, id)                                                                          \
-  Value *res = CALL_EVAL(l->get(id));                                                              \
+  Value *res = eval_unwrap(l->get(id));                                                            \
   ASSERT_F32(res)
 #define EVAL_ANY(res, id)                                                                          \
-  Value *res = CALL_EVAL(l->get(id));                                                              \
+  Value *res = eval_unwrap(l->get(id));                                                            \
   ASSERT_ANY(res)
 
 struct Value {
   enum class Value_t : i32 { UNKNOWN = 0, I32, F32, SYMBOL, BINDING, LAMBDA, ANY };
-  Value_t type;
-  i32     any_type;
+  i32 type;
+  i32 any_type;
   union {
     string_ref str;
     f32        f;
@@ -1345,7 +1346,7 @@ Pool<char>   string_storage;
 Pool<List>   list_storage;
 Pool<Value>  value_storage;
 Symbol_Table symbol_table;
-bool         eval_error   = false;
+bool         eval_error = false;
 //////////////////
 
 Value *alloc_value() { return value_storage.alloc_zero(1); }
@@ -1357,15 +1358,27 @@ string_ref move_cstr(string_ref old) {
   return new_ref;
 }
 
+struct Match {
+  Value *val;
+  bool   match;
+  Match(Value *val) : val(val), match(true) {}
+  Match(Value *val, bool match) : val(val), match(match) {}
+  Value *unwrap() {
+    if (!match) {
+      eval_error = true;
+      return NULL;
+    }
+    return val;
+  }
+};
+
 struct IEvaluator {
   IEvaluator *       parent       = NULL;
-  virtual bool    eval(List *, Value **) = 0;
+  virtual Match      eval(List *) = 0;
   virtual void       release()    = 0;
   static IEvaluator *get_default();
   static IEvaluator *create_mode(string_ref name);
-  static bool global_eval(List *l, Value **ppval) {
-    return get_default()->eval(l, ppval);
-  }
+  static Match       global_eval(List *l) { return get_default()->eval(l); }
 };
 
 struct Default_Evaluator : public IEvaluator {
@@ -1374,19 +1387,18 @@ struct Default_Evaluator : public IEvaluator {
 
   void init() { mods.init(); }
 
-  void release() override { mods.release(); }
-
-  bool eval(List *l, Value **ppval) override {
+  void   release() override { mods.release(); }
+  Value *eval_unwrap(List *l) { return eval(l).unwrap(); }
+  Match  eval(List *l) override {
     if (l == NULL) return NULL;
     ito(mods.size) {
-      Value *val   = mods[i]->eval(l);
+      Match match = mods[i]->eval(l);
       CHECK_ERROR();
-      return val;
+      if (match.match) return match;
     }
     if (l->child != NULL) {
       ASSERT_EVAL(!l->nonempty());
-      Value *child_value = CALL_EVAL(l->child);
-      return child_value;
+      return eval(l->child);
     } else if (l->nonempty()) {
       i32  imm32;
       f32  immf32;
@@ -1395,22 +1407,22 @@ struct Default_Evaluator : public IEvaluator {
       if (is_imm32) {
         Value *new_val = ALLOC_VAL();
         new_val->i     = imm32;
-        new_val->type  = Value::Value_t::I32;
+        new_val->type  = (i32)Value::Value_t::I32;
         return new_val;
       } else if (is_immf32) {
         Value *new_val = ALLOC_VAL();
         new_val->f     = immf32;
-        new_val->type  = Value::Value_t::F32;
+        new_val->type  = (i32)Value::Value_t::F32;
         return new_val;
       } else if (l->cmp_symbol("for-range")) {
         EVAL_SMB(name, 1);
         Value *lb = CALL_EVAL(l->get(2));
-        ASSERT_EVAL(lb != NULL && lb->type == Value::Value_t::I32);
+        ASSERT_EVAL(lb != NULL && lb->type == (i32)Value::Value_t::I32);
         Value *ub = CALL_EVAL(l->get(3));
-        ASSERT_EVAL(ub != NULL && ub->type == Value::Value_t::I32);
+        ASSERT_EVAL(ub != NULL && ub->type == (i32)Value::Value_t::I32);
         Value *new_val = ALLOC_VAL();
         new_val->i     = 0;
-        new_val->type  = Value::Value_t::I32;
+        new_val->type  = (i32)Value::Value_t::I32;
         for (i32 i = lb->i; i < ub->i; i++) {
           symbol_table.enter_scope();
           new_val->i = i;
@@ -1450,7 +1462,7 @@ struct Default_Evaluator : public IEvaluator {
       } else if (l->cmp_symbol("lambda")) {
         Value *new_val = ALLOC_VAL();
         new_val->list  = l->next;
-        new_val->type  = Value::Value_t::LAMBDA;
+        new_val->type  = (i32)Value::Value_t::LAMBDA;
         return new_val;
       } else if (l->cmp_symbol("scope")) {
         symbol_table.enter_scope();
@@ -1468,15 +1480,15 @@ struct Default_Evaluator : public IEvaluator {
         Value *op2 = CALL_EVAL(l->get(2));
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
-        if (op1->type == Value::Value_t::I32) {
+        if (op1->type == (i32)Value::Value_t::I32) {
           Value *new_val = ALLOC_VAL();
           new_val->i     = op1->i + op2->i;
-          new_val->type  = Value::Value_t::I32;
+          new_val->type  = (i32)Value::Value_t::I32;
           return new_val;
-        } else if (op1->type == Value::Value_t::F32) {
+        } else if (op1->type == (i32)Value::Value_t::F32) {
           Value *new_val = ALLOC_VAL();
           new_val->f     = op1->f + op2->f;
-          new_val->type  = Value::Value_t::F32;
+          new_val->type  = (i32)Value::Value_t::F32;
           return new_val;
         } else {
           push_warning("add: unsopported operand types");
@@ -1489,15 +1501,15 @@ struct Default_Evaluator : public IEvaluator {
         Value *op2 = CALL_EVAL(l->get(2));
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
-        if (op1->type == Value::Value_t::I32) {
+        if (op1->type == (i32)Value::Value_t::I32) {
           Value *new_val = ALLOC_VAL();
           new_val->i     = op1->i - op2->i;
-          new_val->type  = Value::Value_t::I32;
+          new_val->type  = (i32)Value::Value_t::I32;
           return new_val;
-        } else if (op1->type == Value::Value_t::F32) {
+        } else if (op1->type == (i32)Value::Value_t::F32) {
           Value *new_val = ALLOC_VAL();
           new_val->f     = op1->f - op2->f;
-          new_val->type  = Value::Value_t::F32;
+          new_val->type  = (i32)Value::Value_t::F32;
           return new_val;
         } else {
           push_warning("sub: unsopported operand types");
@@ -1510,15 +1522,15 @@ struct Default_Evaluator : public IEvaluator {
         Value *op2 = CALL_EVAL(l->get(2));
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
-        if (op1->type == Value::Value_t::I32) {
+        if (op1->type == (i32)Value::Value_t::I32) {
           Value *new_val = ALLOC_VAL();
           new_val->i     = op1->i * op2->i;
-          new_val->type  = Value::Value_t::I32;
+          new_val->type  = (i32)Value::Value_t::I32;
           return new_val;
-        } else if (op1->type == Value::Value_t::F32) {
+        } else if (op1->type == (i32)Value::Value_t::F32) {
           Value *new_val = ALLOC_VAL();
           new_val->f     = op1->f * op2->f;
-          new_val->type  = Value::Value_t::F32;
+          new_val->type  = (i32)Value::Value_t::F32;
           return new_val;
         } else {
           push_warning("mul: unsopported operand types");
@@ -1533,30 +1545,30 @@ struct Default_Evaluator : public IEvaluator {
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
         if (mode->cmp_symbol("lt")) {
-          if (op1->type == Value::Value_t::I32) {
+          if (op1->type == (i32)Value::Value_t::I32) {
             Value *new_val = ALLOC_VAL();
             new_val->i     = op1->i < op2->i ? 1 : 0;
-            new_val->type  = Value::Value_t::I32;
+            new_val->type  = (i32)Value::Value_t::I32;
             return new_val;
-          } else if (op1->type == Value::Value_t::F32) {
+          } else if (op1->type == (i32)Value::Value_t::F32) {
             Value *new_val = ALLOC_VAL();
             new_val->i     = op1->f < op2->f ? 1 : 0;
-            new_val->type  = Value::Value_t::I32;
+            new_val->type  = (i32)Value::Value_t::I32;
             return new_val;
           } else {
             push_error("cmp: unsopported operand types");
             eval_error = true;
           }
         } else if (mode->cmp_symbol("eq")) {
-          if (op1->type == Value::Value_t::I32) {
+          if (op1->type == (i32)Value::Value_t::I32) {
             Value *new_val = ALLOC_VAL();
             new_val->i     = op1->i == op2->i ? 1 : 0;
-            new_val->type  = Value::Value_t::I32;
+            new_val->type  = (i32)Value::Value_t::I32;
             return new_val;
-          } else if (op1->type == Value::Value_t::F32) {
+          } else if (op1->type == (i32)Value::Value_t::F32) {
             Value *new_val = ALLOC_VAL();
             new_val->i     = op1->f == op2->f ? 1 : 0;
-            new_val->type  = Value::Value_t::I32;
+            new_val->type  = (i32)Value::Value_t::I32;
             return new_val;
           } else {
             push_error("cmp: unsopported operand types");
@@ -1576,7 +1588,7 @@ struct Default_Evaluator : public IEvaluator {
       } else if (l->cmp_symbol("quote")) {
         Value *new_val = ALLOC_VAL();
         new_val->list  = l->next;
-        new_val->type  = Value::Value_t::BINDING;
+        new_val->type  = (i32)Value::Value_t::BINDING;
         return new_val;
       } else if (l->cmp_symbol("deref")) {
         return symbol_table.lookup_value(l->next->symbol);
@@ -1588,7 +1600,7 @@ struct Default_Evaluator : public IEvaluator {
         return NULL;
       } else if (l->cmp_symbol("format")) {
         Value *fmt = CALL_EVAL(l->get(1));
-        ASSERT_EVAL(fmt != NULL && fmt->type == Value::Value_t::SYMBOL);
+        ASSERT_EVAL(fmt != NULL && fmt->type == (i32)Value::Value_t::SYMBOL);
         List *cur = l->get(2);
         {
           char *      tmp_buf = (char *)tl_alloc_tmp(0x100);
@@ -1608,15 +1620,15 @@ struct Default_Evaluator : public IEvaluator {
                 return NULL;
               } else {
                 i32    num_chars = 0;
-                Value *val       = eval(cur);
+                Value *val       = CALL_EVAL(cur);
                 if (c[1] == 'i') {
-                  ASSERT_EVAL(val != NULL && val->type == Value::Value_t::I32);
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::I32);
                   num_chars = sprintf(tmp_buf + cursor, "%i", val->i);
                 } else if (c[1] == 'f') {
-                  ASSERT_EVAL(val != NULL && val->type == Value::Value_t::F32);
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::F32);
                   num_chars = sprintf(tmp_buf + cursor, "%f", val->f);
                 } else if (c[1] == 's') {
-                  ASSERT_EVAL(val != NULL && val->type == Value::Value_t::SYMBOL);
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::SYMBOL);
                   num_chars = sprintf(tmp_buf + cursor, "%.*s", (i32)val->str.len, val->str.ptr);
                 } else {
                   eval_error = true;
@@ -1644,14 +1656,14 @@ struct Default_Evaluator : public IEvaluator {
           }
           Value *new_val = ALLOC_VAL();
           new_val->str   = stref_s(tmp_buf);
-          new_val->type  = Value::Value_t::SYMBOL;
+          new_val->type  = (i32)Value::Value_t::SYMBOL;
           return new_val;
         }
       } else {
         ASSERT_EVAL(l->nonempty());
         Value *sym = symbol_table.lookup_value(l->symbol);
         if (sym != NULL) {
-          if (sym->type == Value::Value_t::LAMBDA) {
+          if (sym->type == (i32)Value::Value_t::LAMBDA) {
             ASSERT_EVAL(sym->list->child != NULL);
             List *lambda   = sym->list; // Try to evaluate
             List *arg_name = lambda->child;
@@ -1673,7 +1685,7 @@ struct Default_Evaluator : public IEvaluator {
               cur  = cur->next;
             }
             return last;
-          } else if (sym->type == Value::Value_t::BINDING) {
+          } else if (sym->type == (i32)Value::Value_t::BINDING) {
             Value *val = CALL_EVAL(sym->list);
             return val;
           }
@@ -1681,7 +1693,7 @@ struct Default_Evaluator : public IEvaluator {
         }
         Value *new_val = ALLOC_VAL();
         new_val->str   = l->symbol;
-        new_val->type  = Value::Value_t::SYMBOL;
+        new_val->type  = (i32)Value::Value_t::SYMBOL;
         return new_val;
       }
     }
@@ -1689,7 +1701,7 @@ struct Default_Evaluator : public IEvaluator {
   }
 };
 
-#if 1
+#if 0
 
 #define UNWRAP_LLVM_VALUE(x) (llvm::Value *)x->any
 #define UNWRAP_LLVM_TYPE(x) (llvm::Type *)x->any
@@ -1708,14 +1720,14 @@ struct LLVM_Evaluator : public IEvaluator {
   Value *wrap_value(llvm::Value *val) {
     Value *new_val    = ALLOC_VAL();
     new_val->any      = val;
-    new_val->type     = Value::Value_t::ANY;
+    new_val->type     = (i32)Value::Value_t::ANY;
     new_val->any_type = (i32)LLVM_Value_t::VALUE;
     return new_val;
   }
   Value *wrap_type(llvm::Type *type) {
     Value *new_val    = ALLOC_VAL();
     new_val->any      = type;
-    new_val->type     = Value::Value_t::ANY;
+    new_val->type     = (i32)Value::Value_t::ANY;
     new_val->any_type = (i32)LLVM_Value_t::TYPE;
     return new_val;
   }
@@ -1820,7 +1832,7 @@ struct LLVM_Evaluator : public IEvaluator {
     ASSERT_EVAL(l->nonempty());
     Value *     prev_val = symbol_table.lookup_value(l->symbol);
     llvm::Type *prev     = NULL;
-    if (prev_val != NULL && prev_val->type == Value::Value_t::ANY &&
+    if (prev_val != NULL && prev_val->type == (i32)Value::Value_t::ANY &&
         prev_val->any_type == (i32)LLVM_Value_t::TYPE) {
       prev = (llvm::Type *)prev_val->any;
     }
@@ -1900,12 +1912,12 @@ struct LLVM_Evaluator : public IEvaluator {
     }
     return arr;
   }
-  Value *      eval(List *l) override { return wrap_value(llvm_eval(l)); }
-  llvm::Value *llvm_eval(List *l) {
+
+  Match eval(List *l) override {
     ASSERT_EVAL(l != NULL);
     if (!l->nonempty()) {
       ASSERT_EVAL(l->child != NULL);
-      return CALL_LLVM_EVAL(l->child);
+      return global_eval(l->child);
     }
     ASSERT_EVAL(l->nonempty());
     TMP_STORAGE_SCOPE;
@@ -1919,15 +1931,16 @@ struct LLVM_Evaluator : public IEvaluator {
         arg = arg->next;
       }
     }
-    i32  imm32;
-    f32  immf32;
-    bool is_imm32  = parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
-    bool is_immf32 = parse_float(l->symbol.ptr, l->symbol.len, &immf32);
-    if (is_imm32) {
-      return llvm_get_constant_i32(imm32);
-    } else if (is_immf32) {
-      return llvm_get_constant_f32(immf32);
-    } else if (l->cmp_symbol("fcmp")) {
+    //    i32  imm32;
+    //    f32  immf32;
+    //    bool is_imm32  = parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
+    //    bool is_immf32 = parse_float(l->symbol.ptr, l->symbol.len, &immf32);
+    //    if (is_imm32) {
+    //      return wrap_value(llvm_get_constant_i32(imm32));
+    //    } else if (is_immf32) {
+    //      return wrap_value(llvm_get_constant_f32(immf32));
+    //    } else
+    if (l->cmp_symbol("fcmp")) {
       ASSERT_EVAL(argc == 3);
       llvm::FCmpInst::Predicate type = llvm::FCmpInst::FCMP_FALSE;
       if (argv[0]->cmp_symbol("eq")) {
@@ -1945,7 +1958,7 @@ struct LLVM_Evaluator : public IEvaluator {
       }
       EVAL_LLVM(val_0, argv[1]);
       EVAL_LLVM(val_1, argv[2]);
-      return llvm_builder->CreateFCmp(type, val_0, val_1);
+      return wrap_value(llvm_builder->CreateFCmp(type, val_0, val_1));
     } else if (l->cmp_symbol("icmp")) {
       ASSERT_EVAL(argc == 3);
       llvm::ICmpInst::Predicate type = llvm::ICmpInst::FCMP_FALSE;
@@ -1972,14 +1985,14 @@ struct LLVM_Evaluator : public IEvaluator {
       }
       EVAL_LLVM(val_0, argv[1]);
       EVAL_LLVM(val_1, argv[2]);
-      return llvm_builder->CreateICmp(type, val_0, val_1);
+      return wrap_value(llvm_builder->CreateICmp(type, val_0, val_1));
     } else
 #define BINOP(mn, fn)                                                                              \
   if (l->cmp_symbol(mn)) {                                                                         \
     ASSERT_EVAL(argc == 2);                                                                        \
     EVAL_LLVM(val_0, argv[0]);                                                                     \
     EVAL_LLVM(val_1, argv[1]);                                                                     \
-    return llvm_builder->fn(val_0, val_1);                                                         \
+    return wrap_value(llvm_builder->fn(val_0, val_1));                                             \
   }
       // clang-format off
       BINOP("fadd", CreateFAdd)
@@ -1990,9 +2003,9 @@ struct LLVM_Evaluator : public IEvaluator {
       else
       BINOP("fdiv", CreateFDiv)
       else
-      BINOP("add", CreateAdd)
+      BINOP("iadd", CreateAdd)
       else
-      BINOP("sub", CreateSub)
+      BINOP("isub", CreateSub)
       else
       BINOP("sdiv", CreateSDiv)
       else
@@ -2007,7 +2020,7 @@ struct LLVM_Evaluator : public IEvaluator {
         if (l->cmp_symbol("load")) {
       ASSERT_EVAL(argc == 1);
       EVAL_LLVM(val, argv[0]);
-      return llvm_builder->CreateLoad(val);
+      return wrap_value(llvm_builder->CreateLoad(val));
     }
     else if (l->cmp_symbol("all")) {
       ASSERT_EVAL(argc == 1);
@@ -2019,7 +2032,7 @@ struct LLVM_Evaluator : public IEvaluator {
       llvm::Value *bc  = llvm_builder->CreateBitCast(val, llvm::Type::getIntNTy(c, cnt));
       llvm::Value *cmp =
           llvm_builder->CreateICmpEQ(bc, llvm::ConstantInt::get(c, llvm::APInt(cnt, ~0, false)));
-      return cmp;
+      return wrap_value(cmp);
     }
     else if (l->cmp_symbol("any")) {
       ASSERT_EVAL(argc == 1);
@@ -2031,7 +2044,7 @@ struct LLVM_Evaluator : public IEvaluator {
       llvm::Value *bc  = llvm_builder->CreateBitCast(val, llvm::Type::getIntNTy(c, cnt));
       llvm::Value *cmp =
           llvm_builder->CreateICmpNE(bc, llvm::ConstantInt::get(c, llvm::APInt(cnt, 0, false)));
-      return cmp;
+      return wrap_value(cmp);
     }
     else if (l->cmp_symbol("none")) {
       ASSERT_EVAL(argc == 1);
@@ -2043,13 +2056,13 @@ struct LLVM_Evaluator : public IEvaluator {
       llvm::Value *bc  = llvm_builder->CreateBitCast(val, llvm::Type::getIntNTy(c, cnt));
       llvm::Value *cmp =
           llvm_builder->CreateICmpEQ(bc, llvm::ConstantInt::get(c, llvm::APInt(cnt, 0, false)));
-      return cmp;
+      return wrap_value(cmp);
     }
     else if (l->cmp_symbol("not")) {
       ASSERT_EVAL(argc == 1);
       EVAL_LLVM(val, argv[0]);
       llvm::Value *cmp = llvm_builder->CreateNot(val);
-      return cmp;
+      return wrap_value(cmp);
     }
     else if (l->cmp_symbol("at")) {
       ASSERT_EVAL(argc > 1);
@@ -2059,7 +2072,7 @@ struct LLVM_Evaluator : public IEvaluator {
         CHECK_ERROR();
       }
       EVAL_LLVM(val, argv[0]);
-      return llvm_builder->CreateLoad(llvm_builder->CreateGEP(val, chain));
+      return wrap_value(llvm_builder->CreateLoad(llvm_builder->CreateGEP(val, chain)));
     }
     else if (l->cmp_symbol("gep")) {
       ASSERT_EVAL(argc > 1);
@@ -2069,14 +2082,14 @@ struct LLVM_Evaluator : public IEvaluator {
         CHECK_ERROR();
       }
       EVAL_LLVM(val, argv[0]);
-      return llvm_builder->CreateGEP(val, chain);
+      return wrap_value(llvm_builder->CreateGEP(val, chain));
     }
     else if (l->cmp_symbol("extract_element")) {
       ASSERT_EVAL(argc > 1);
       EVAL_LLVM(val, argv[0]);
       i32 i = parse_int(argv[1]);
       CHECK_ERROR();
-      return llvm_builder->CreateExtractElement(val, llvm_get_constant_i32(i));
+      return wrap_value(llvm_builder->CreateExtractElement(val, llvm_get_constant_i32(i)));
     }
     else if (l->cmp_symbol("insert_element")) {
       ASSERT_EVAL(argc > 1);
@@ -2084,7 +2097,7 @@ struct LLVM_Evaluator : public IEvaluator {
       EVAL_LLVM(val1, argv[1]);
       i32 i = parse_int(argv[2]);
       CHECK_ERROR();
-      return llvm_builder->CreateInsertElement(val, val1, i);
+      return wrap_value(llvm_builder->CreateInsertElement(val, val1, i));
     }
     else if (l->cmp_symbol("extract_value")) {
       ASSERT_EVAL(argc > 1);
@@ -2095,7 +2108,7 @@ struct LLVM_Evaluator : public IEvaluator {
         indxs.push_back(in);
       }
       EVAL_LLVM(val, argv[0]);
-      return llvm_builder->CreateExtractValue(val, indxs);
+      return wrap_value(llvm_builder->CreateExtractValue(val, indxs));
     }
     else if (l->cmp_symbol("insert_value")) {
       ASSERT_EVAL(argc > 1);
@@ -2107,25 +2120,25 @@ struct LLVM_Evaluator : public IEvaluator {
       }
       EVAL_LLVM(val, argv[0]);
       EVAL_LLVM(val1, argv[1]);
-      return llvm_builder->CreateInsertValue(val, val1, indxs);
+      return wrap_value(llvm_builder->CreateInsertValue(val, val1, indxs));
     }
     else if (l->cmp_symbol("store")) {
       ASSERT_EVAL(argc == 2);
       EVAL_LLVM(val, argv[0]);
       EVAL_LLVM(val1, argv[1]);
-      return llvm_builder->CreateStore(val, val1);
+      return wrap_value(llvm_builder->CreateStore(val, val1));
     }
     else if (l->cmp_symbol("bitcast")) {
       ASSERT_EVAL(argc == 2);
       EVAL_LLVM(val, argv[0]);
       llvm::Type *ty = parse_type(argv[1]);
       CHECK_ERROR();
-      return llvm_builder->CreateBitCast(val, ty);
+      return wrap_value(llvm_builder->CreateBitCast(val, ty));
     }
     else if (l->cmp_symbol("alloca")) {
       ASSERT_EVAL(argc == 1);
       llvm::Type *type = CHK_ERR(parse_type(argv[0]));
-      return llvm_builder->CreateAlloca(type);
+      return wrap_value(llvm_builder->CreateAlloca(type));
     }
     else if (l->cmp_symbol("make_array")) {
       ASSERT_EVAL(argc > 1);
@@ -2136,7 +2149,7 @@ struct LLVM_Evaluator : public IEvaluator {
         EVAL_LLVM(val, argv[1 + i]);
         arr = llvm_builder->CreateInsertValue(arr, val, i);
       }
-      return arr;
+      return wrap_value(arr);
     }
     else if (l->cmp_symbol("make_matrix")) {
       ASSERT_EVAL(argc > 1);
@@ -2150,26 +2163,26 @@ struct LLVM_Evaluator : public IEvaluator {
       llvm::Type * arr_ty  = llvm::ArrayType::get(rows[0]->getType(), rows.size());
       llvm::Value *arr     = llvm::UndefValue::get(arr_ty);
       ito(rows.size()) arr = llvm_builder->CreateInsertValue(arr, rows[i], i);
-      return arr;
+      return wrap_value(arr);
     }
     else if (l->cmp_symbol("make_vector")) {
       llvm::Value *vec = CHK_ERR(make_vector(parse_type(l->next), l->next->next));
-      return vec;
+      return wrap_value(vec);
     }
-    else if (l->cmp_symbol("let")) {
-      ASSERT_EVAL(argc == 2);
-      string_ref   val_name = argv[0]->get_symbol();
-      llvm::Value *val      = CALL_LLVM_EVAL(argv[1]);
-      symbol_table.add_symbol(val_name, wrap_value(val));
-      return NULL;
-    }
-    else if (l->cmp_symbol("def")) {
-      ASSERT_EVAL(argc == 2);
-      string_ref  val_name = argv[0]->get_symbol();
-      llvm::Type *val      = CHK_ERR(parse_type(argv[1]));
-      symbol_table.add_symbol(val_name, wrap_type(val));
-      return NULL;
-    }
+    //    else if (l->cmp_symbol("let")) {
+    //      ASSERT_EVAL(argc == 2);
+    //      string_ref   val_name = argv[0]->get_symbol();
+    //      llvm::Value *val      = CALL_LLVM_EVAL(argv[1]);
+    //      symbol_table.add_symbol(val_name, wrap_value(val));
+    //      return NULL;
+    //    }
+    //    else if (l->cmp_symbol("def")) {
+    //      ASSERT_EVAL(argc == 2);
+    //      string_ref  val_name = argv[0]->get_symbol();
+    //      llvm::Type *val      = CHK_ERR(parse_type(argv[1]));
+    //      symbol_table.add_symbol(val_name, wrap_type(val));
+    //      return NULL;
+    //    }
     else if (l->cmp_symbol("printf")) {
       ASSERT_EVAL(argc > 0);
       List *                              fmt = argv[0];
@@ -2222,7 +2235,7 @@ struct LLVM_Evaluator : public IEvaluator {
       defer(symbol_table.exit_scope());
       List *cur = l->next;
       while (cur != NULL) {
-        CHK_ERR(eval(cur));
+        CHK_ERR(global_eval(cur));
         cur = cur->next;
       }
 
@@ -2299,7 +2312,7 @@ struct LLVM_Evaluator : public IEvaluator {
       defer(symbol_table.exit_scope());
       List *cur = func_node->get(4);
       while (cur != NULL) {
-        CHK_ERR(eval(cur));
+        CHK_ERR(global_eval(cur));
         cur = cur->next;
       }
       cur_fun = NULL;
@@ -2332,17 +2345,39 @@ struct LLVM_Evaluator : public IEvaluator {
     else if (l->cmp_symbol("ignore")) {
       return NULL;
     }
-    else {
-      Value *raw_val = symbol_table.lookup_value(l->symbol);
-      if (raw_val != NULL && raw_val->type == Value::Value_t::ANY &&
-          raw_val->any_type == (i32)LLVM_Value_t::VALUE) {
-        llvm::Value *val = (llvm::Value*)raw_val->any;
+    //    else {
+    //      Value *raw_val = symbol_table.lookup_value(l->symbol);
+    //      if (raw_val != NULL && raw_val->type == (i32)Value::Value_t::ANY &&
+    //          raw_val->any_type == (i32)LLVM_Value_t::VALUE) {
+    //        llvm::Value *val = (llvm::Value *)raw_val->any;
+    //        ASSERT_EVAL(val);
+    //        return wrap_value(val);
+    //      }
+    //    }
+    else { // no match
+      return {NULL, false};
+    }
+    TRAP;
+  }
+
+  llvm::Value *llvm_eval(List *l) {
+    Match match = global_eval(l);
+    if (match.match && match.val != NULL) {
+      if (match.val->type == (i32)Value::Value_t::ANY &&
+          match.val->any_type == (i32)LLVM_Value_t::VALUE) {
+        llvm::Value *val = (llvm::Value *)match.val->any;
         ASSERT_EVAL(val);
         return val;
-      } else {
-        eval_nomatch = true;
-        return NULL;
+      } else if (match.val->type == (i32)Value::Value_t::I32) {
+        return llvm_get_constant_i32(match.val->f);
+      } else if (match.val->type == (i32)Value::Value_t::F32) {
+        return llvm_get_constant_f32(match.val->f);
+      } else if (match.val->type == (i32)Value::Value_t::SYMBOL) {
+        return lookup_string(match.val->str);
       }
+    } else {
+      eval_error = true;
+      return NULL;
     }
     TRAP;
   }
