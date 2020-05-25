@@ -27,6 +27,19 @@ void ll_printf(char const *fmt, ...) {
   va_end(args);
   fflush(stdout);
 }
+void ll_puts(char const *str) {
+  puts(str);
+  fflush(stdout);
+}
+char *ll_format(char *buf, char const *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vsprintf(buf, fmt, args);
+  va_end(args);
+  return buf;
+}
+int  fmt_insert_float(char *buf, int maxlen, float a) { return snprintf(buf, maxlen, "%f", a); }
+int  fmt_insert_int(char *buf, int maxlen, int a) { return snprintf(buf, maxlen, "%i", a); }
 void ll_debug_assert(bool val, char const *str) {
   if (!val) {
     fprintf(stdout, "[debug] fail: %s\n", str);
@@ -42,6 +55,7 @@ void ll_assert(bool val, char const *str) {
     abort();
   }
 }
+void ll_print_zero() { printf("%f\n", 555.0f); }
 }
 #else
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
@@ -1379,6 +1393,7 @@ struct IEvaluator {
   static IEvaluator *get_default();
   static IEvaluator *create_mode(string_ref name);
   static Match       global_eval(List *l) { return get_default()->eval(l); }
+  Value *eval_unwrap(List *l) { return global_eval(l).unwrap(); }
 };
 
 struct Default_Evaluator : public IEvaluator {
@@ -1388,7 +1403,6 @@ struct Default_Evaluator : public IEvaluator {
   void init() { mods.init(); }
 
   void   release() override { mods.release(); }
-  Value *eval_unwrap(List *l) { return eval(l).unwrap(); }
   Match  eval(List *l) override {
     if (l == NULL) return NULL;
     ito(mods.size) {
@@ -1580,10 +1594,11 @@ struct Default_Evaluator : public IEvaluator {
         }
         return NULL;
       } else if (l->cmp_symbol("let")) {
-        EVAL_SMB(name, 1);
+        List *name = l->next;
+        ASSERT_EVAL(name->nonempty());
         Value *val = CALL_EVAL(l->get(2));
         ASSERT_EVAL(val != NULL);
-        symbol_table.add_symbol(name->str, val);
+        symbol_table.add_symbol(name->symbol, val);
         return val;
       } else if (l->cmp_symbol("quote")) {
         Value *new_val = ALLOC_VAL();
@@ -1701,7 +1716,7 @@ struct Default_Evaluator : public IEvaluator {
   }
 };
 
-#if 0
+#if 1
 
 #define UNWRAP_LLVM_VALUE(x) (llvm::Value *)x->any
 #define UNWRAP_LLVM_TYPE(x) (llvm::Type *)x->any
@@ -1846,7 +1861,10 @@ struct LLVM_Evaluator : public IEvaluator {
     //        UNIMPLEMENTED;
     //      }
     //    } else
-    if (l->cmp_symbol("i32")) {
+    if (l->cmp_symbol("typeof")) {
+      EVAL_LLVM(val, l->next);
+      return val->getType();
+    } else if (l->cmp_symbol("i32")) {
       return llvm::Type::getInt32Ty(c);
     } else if (l->cmp_symbol("i64")) {
       return llvm::Type::getInt64Ty(c);
@@ -2087,9 +2105,8 @@ struct LLVM_Evaluator : public IEvaluator {
     else if (l->cmp_symbol("extract_element")) {
       ASSERT_EVAL(argc > 1);
       EVAL_LLVM(val, argv[0]);
-      i32 i = parse_int(argv[1]);
-      CHECK_ERROR();
-      return wrap_value(llvm_builder->CreateExtractElement(val, llvm_get_constant_i32(i)));
+      EVAL_I32(index, 2)
+      return wrap_value(llvm_builder->CreateExtractElement(val, llvm_get_constant_i32(index->i)));
     }
     else if (l->cmp_symbol("insert_element")) {
       ASSERT_EVAL(argc > 1);
@@ -2137,7 +2154,13 @@ struct LLVM_Evaluator : public IEvaluator {
     }
     else if (l->cmp_symbol("alloca")) {
       ASSERT_EVAL(argc == 1);
-      llvm::Type *type = CHK_ERR(parse_type(argv[0]));
+      //      Value *type_val = global_eval(argv[0]).unwrap();
+      //      CHECK_ERROR();
+      //      ASSERT_EVAL(type_val != NULL &&
+      //                      type_val->type == (i32)Value::Value_t::ANY &&type_val->any_type =
+      //                      (i32)LLVM_Value_t::TYPE);
+      //      llvm::Type *type = CHK_ERR(parse_type((llvm::Type *)type_val->any));
+      llvm::Type *type = CHK_ERR(parse_type(l->next));
       return wrap_value(llvm_builder->CreateAlloca(type));
     }
     else if (l->cmp_symbol("make_array")) {
@@ -2183,13 +2206,43 @@ struct LLVM_Evaluator : public IEvaluator {
     //      symbol_table.add_symbol(val_name, wrap_type(val));
     //      return NULL;
     //    }
-    else if (l->cmp_symbol("printf")) {
+    else if (l->cmp_symbol("format")) {
       ASSERT_EVAL(argc > 0);
-      List *                              fmt = argv[0];
+      EVAL_LLVM(buf, argv[0]);
+      List *fmt_val = argv[1];
+      ASSERT_EVAL(fmt_val->nonempty());
+      string_ref fmt = fmt_val->symbol;
+      //      i32 i = 0;
+      //      i32 arg_id = 0;
+
+      //      while (i < fmt.len) {
+      //        char c = fmt.ptr[c];
+      //        if (c == "%") {
+      //          ASSERT_EVAL(arg_id < argc - 2);
+      //          EVAL_LLVM(arg, argv[2 + arg_id]);
+      //          if (arg->getType() == llvm::Type::getInt32Ty(c)) {
+      //            llvm_builder->CreateCall(module->getFunction("fmt_insert_"), argv_values);
+      //          }
+      //        }
+      //      }
+
       llvm::SmallVector<llvm::Value *, 4> argv_values;
-      argv_values.push_back(lookup_string(fmt->symbol));
-      ito(argc - 1) argv_values.push_back(llvm_eval(argv[1 + i]));
-      llvm_builder->CreateCall(ll_printf, argv_values);
+      argv_values.push_back(buf);
+      argv_values.push_back(lookup_string(fmt));
+      ito(argc - 2) {
+        EVAL_LLVM(val, argv[2 + i]);
+        if (val->getType() == llvm::Type::getFloatTy(c)) {
+          // conversion due to C lib standard
+          val = llvm_builder->CreateFPExt(val, llvm::Type::getDoubleTy(c));
+        }
+        argv_values.push_back(val);
+      }
+      return wrap_value(llvm_builder->CreateCall(module->getFunction("ll_format"), argv_values));
+    }
+    else if (l->cmp_symbol("puts")) {
+      ASSERT_EVAL(argc == 1);
+      EVAL_LLVM(val, argv[0]);
+      llvm_builder->CreateCall(module->getFunction("ll_puts"), {val});
       return NULL;
     }
     else if (l->cmp_symbol("assert")) {
@@ -2342,6 +2395,10 @@ struct LLVM_Evaluator : public IEvaluator {
       llvm_builder.release();
       return NULL;
     }
+    else if (l->cmp_symbol("typeof")) {
+      EVAL_LLVM(val, argv[0]);
+      return wrap_type(val->getType());
+    }
     else if (l->cmp_symbol("ignore")) {
       return NULL;
     }
@@ -2369,7 +2426,7 @@ struct LLVM_Evaluator : public IEvaluator {
         ASSERT_EVAL(val);
         return val;
       } else if (match.val->type == (i32)Value::Value_t::I32) {
-        return llvm_get_constant_i32(match.val->f);
+        return llvm_get_constant_i32(match.val->i);
       } else if (match.val->type == (i32)Value::Value_t::F32) {
         return llvm_get_constant_f32(match.val->f);
       } else if (match.val->type == (i32)Value::Value_t::SYMBOL) {
