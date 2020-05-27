@@ -250,8 +250,12 @@ static inline void map_pages(void *ptr, size_t num_pages) {}
 #endif
 
 template <typename T, typename V> struct Pair {
-  T first;
-  V second;
+  T    first;
+  V    second;
+  void bind(T &f, V &s) {
+    f = first;
+    s = second;
+  }
 };
 
 template <typename T, typename V> Pair<T, V> make_pair(T t, V v) { return {t, v}; }
@@ -574,7 +578,8 @@ struct Default_Allocator {
   static void free(void *ptr) { tl_free(ptr); }
 };
 
-template <typename T, size_t grow_k = 0x100, typename Allcator_t = Default_Allocator> struct Array {
+template <typename T, size_t grow_k = 0x100, typename Allcator_t = Default_Allocator> //
+struct Array {
   T *    ptr;
   size_t size;
   size_t capacity;
@@ -646,7 +651,8 @@ template <typename T, size_t grow_k = 0x100, typename Allcator_t = Default_Alloc
   }
 };
 
-template <typename T, u32 N, typename Allcator_t = Default_Allocator> struct SmallArray {
+template <typename T, u32 N, typename Allcator_t = Default_Allocator> //
+struct SmallArray {
   T                           local[N];
   size_t                      size;
   Array<T, N * 3, Allcator_t> array;
@@ -781,21 +787,24 @@ struct Hash_Set {
     return true;
   }
 
-  bool remove(K key) {
-    if (item_count == 0) return -1;
-    i32 id = find(key);
-    if (id > -1) {
-      ASSERT_DEBUG(item_count > 0);
-      arr.ptr[id].hash = 0u;
-      item_count -= 1;
-      if (item_count == 0) {
-        arr.release();
-      } else if (arr.size + grow_k < arr.capacity) {
-        try_resize(arr.capacity - grow_k);
+  void remove(K key) {
+    if (item_count == 0) return;
+    while (true) {
+      i32 id = find(key);
+      if (id > -1) {
+        ASSERT_DEBUG(item_count > 0);
+        arr.ptr[id].hash = 0u;
+        item_count -= 1;
+        if (item_count == 0) {
+          arr.release();
+        } else if (arr.size + grow_k < arr.capacity) {
+          try_resize(arr.capacity - grow_k);
+        }
+
+      } else {
+        break;
       }
-      return true;
     }
-    return false;
   }
 
   bool insert(K key) {
@@ -837,6 +846,7 @@ template <typename K, typename V> u64 hash_of(Map_Pair<K, V> const &item) {
 template <typename K, typename V, typename Allcator_t = Default_Allocator, size_t grow_k = 0x100,
           size_t MAX_ATTEMPTS = 0x20>
 struct Hash_Table {
+  using Pair_t = Map_Pair<K, V>;
   Hash_Set<Map_Pair<K, V>, Allcator_t, grow_k, MAX_ATTEMPTS> set;
   void                                                       release() { set.release(); }
   void                                                       init() { set.init(); }
@@ -861,6 +871,15 @@ struct Hash_Table {
   bool insert(K key, V value) { return set.insert(Map_Pair<K, V>{.key = key, .value = value}); }
 
   bool contains(K key) { return set.contains(Map_Pair<K, V>{.key = key, .value = {}}); }
+
+  template <typename F> void iter(F f) {
+    ito(set.arr.size) {
+      auto &item = set.arr[i];
+      if (item.hash != 0) {
+        f(item.key);
+      }
+    }
+  }
 };
 
 struct Thread_Local {
@@ -1279,6 +1298,43 @@ struct Value {
     List *     list;
     void *     any;
   };
+  void dump() {
+    fprintf(stdout, "Value; {\n");
+    switch (type) {
+    case (i32)Value_t::I32: {
+      fprintf(stdout, "  i32: %i\n", i);
+      break;
+    }
+    case (i32)Value_t::F32: {
+      fprintf(stdout, "  f32: %f\n", f);
+      break;
+    }
+    case (i32)Value_t::SYMBOL: {
+      fprintf(stdout, "  sym: %.*s\n", STRF(str));
+      break;
+    }
+    case (i32)Value_t::BINDING: {
+      fprintf(stdout, "  bnd:\n");
+      list->dump(4);
+      break;
+    }
+    case (i32)Value_t::LAMBDA: {
+      fprintf(stdout, "  lmb:\n");
+      list->dump(4);
+      break;
+    }
+    case (i32)Value_t::SCOPE: {
+      fprintf(stdout, "  scp\n");
+      break;
+    }
+    case (i32)Value_t::ANY: {
+      fprintf(stdout, "  any\n");
+      break;
+    }
+    default: UNIMPLEMENTED;
+    }
+    fprintf(stdout, "}\n");
+  }
 };
 
 struct Symbol_Table {
@@ -1287,9 +1343,10 @@ struct Symbol_Table {
     Value *    val;
   };
   struct Symbol_Hash_Table {
-    Hash_Table<string_ref, Value *, Default_Allocator, 0x10, 0x10> table;
-    Symbol_Hash_Table *                                            prev;
-    void                                                           init() {
+    using Table_t = Hash_Table<string_ref, Value *, Default_Allocator, 0x10, 0x10>;
+    Table_t            table;
+    Symbol_Hash_Table *prev;
+    void               init() {
       table.init();
       prev = NULL;
     }
@@ -1347,6 +1404,17 @@ struct Symbol_Table {
     tail->release();
     table_storage.pop();
     tail = new_tail;
+  }
+  void ATTR_USED dump() {
+    Symbol_Hash_Table *cur = tail;
+    while (cur != NULL) {
+      fprintf(stdout, "--------new-table\n");
+      cur->table.iter([&](Symbol_Hash_Table::Table_t::Pair_t const &item) {
+        fprintf(stdout, "symbol(\"%.*s\"):\n", STRF(item.key));
+        item.value->dump();
+      });
+      cur = cur->prev;
+    }
   }
   void add_symbol(string_ref name, Value *val) { tail->table.insert(name, val); }
 };
@@ -1431,13 +1499,32 @@ struct IEvaluator {
   Value *               eval_unwrap(List *l) { return global_eval(l).unwrap(); }
   Pair<Value *, List *> eval_and_next_arg(List *l) {
     Value *a = eval_unwrap(l);
-    if (a->type == (i32)Value::Value_t::BINDING) {
+    if (a != NULL && a->type == (i32)Value::Value_t::BINDING) {
       List *next = l->next;
       if (next == NULL) next = a->list->next;
       a = eval_unwrap(a->list);
       return make_pair(a, next);
     } else {
       return make_pair(a, l->next);
+    }
+  }
+  Value *eval_args(List *arg) {
+    List * cur  = arg;
+    Value *last = NULL;
+    while (cur != NULL) {
+      auto p = eval_and_next_arg(cur);
+      cur    = p.second;
+      last   = p.first;
+    }
+    return last;
+  }
+  template <typename V> void eval_args_and_collect(List *l, V &values) {
+    while (true) {
+      auto   p = eval_and_next_arg(l);
+      Value *a = p.first;
+      values.push(a);
+      l = p.second;
+      if (l == NULL) break;
     }
   }
   Value *    alloc_value() { return state->alloc_value(); }
@@ -1460,20 +1547,9 @@ struct Default_Evaluator : public IEvaluator {
       if (match.match) return match;
     }
     TMP_STORAGE_SCOPE;
-    SmallArray<Value *, 8> argv;
-    auto                   eval_args = [&](List *arg) {
-      List *cur = arg;
-      Value *last = NULL;
-      while (cur != NULL) {
-        auto p = eval_and_next_arg(cur);
-        cur = p.second;
-        last = p.first;
-      }
-      return last;
-    };
     if (l->child != NULL) {
       ASSERT_EVAL(!l->nonempty());
-      return eval(l->child);
+      return global_eval(l->child);
     } else if (l->nonempty()) {
       i32  imm32;
       f32  immf32;
@@ -1505,12 +1581,7 @@ struct Default_Evaluator : public IEvaluator {
           new_val->i = i;
           state->symbol_table.add_symbol(name, new_val);
           defer(state->symbol_table.exit_scope());
-//          eval_args(l->get(4));
-          List *cur = l->get(4);
-          while (cur != NULL) {
-            CALL_EVAL(cur);
-            cur = cur->next;
-          }
+          eval_args(l->get(4));
         }
         return NULL;
       } else if (l->cmp_symbol("if")) {
@@ -1531,11 +1602,7 @@ struct Default_Evaluator : public IEvaluator {
         IEvaluator *mode = IEvaluator::create_mode(name->str);
         ASSERT_EVAL(mode != NULL);
         mods.push(mode);
-        List *cur = l->get(2);
-        while (cur != NULL) {
-          CALL_EVAL(cur);
-          cur = cur->next;
-        }
+        eval_args(l->get(2));
         return NULL;
       } else if (l->cmp_symbol("lambda")) {
         Value *new_val = ALLOC_VAL();
@@ -1545,17 +1612,12 @@ struct Default_Evaluator : public IEvaluator {
       } else if (l->cmp_symbol("scope")) {
         state->symbol_table.enter_scope();
         defer(state->symbol_table.exit_scope());
-        List * cur  = l->get(1);
-        Value *last = NULL;
-        while (cur != NULL) {
-          last = CALL_EVAL(cur);
-          cur  = cur->next;
-        }
-        return last;
+        return eval_args(l->next);
       } else if (l->cmp_symbol("add")) {
-        Value *op1 = CALL_EVAL(l->get(1));
+        auto   p   = eval_and_next_arg(l->get(1));
+        Value *op1 = p.first;
         ASSERT_EVAL(op1 != NULL);
-        Value *op2 = CALL_EVAL(l->get(2));
+        Value *op2 = CALL_EVAL(p.second);
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
         if (op1->type == (i32)Value::Value_t::I32) {
@@ -1573,9 +1635,12 @@ struct Default_Evaluator : public IEvaluator {
         }
         return NULL;
       } else if (l->cmp_symbol("sub")) {
-        Value *op1 = CALL_EVAL(l->get(1));
+        SmallArray<Value *, 2> args;
+        eval_args_and_collect(l->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
         ASSERT_EVAL(op1 != NULL);
-        Value *op2 = CALL_EVAL(l->get(2));
+        Value *op2 = args[1];
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
         if (op1->type == (i32)Value::Value_t::I32) {
@@ -1593,9 +1658,12 @@ struct Default_Evaluator : public IEvaluator {
         }
         return NULL;
       } else if (l->cmp_symbol("mul")) {
-        Value *op1 = CALL_EVAL(l->get(1));
+        SmallArray<Value *, 2> args;
+        eval_args_and_collect(l->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
         ASSERT_EVAL(op1 != NULL);
-        Value *op2 = CALL_EVAL(l->get(2));
+        Value *op2 = args[1];
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
         if (op1->type == (i32)Value::Value_t::I32) {
@@ -1613,10 +1681,13 @@ struct Default_Evaluator : public IEvaluator {
         }
         return NULL;
       } else if (l->cmp_symbol("cmp")) {
-        List * mode = l->next;
-        Value *op1  = CALL_EVAL(l->get(2));
+        List *                 mode = l->next;
+        SmallArray<Value *, 2> args;
+        eval_args_and_collect(mode->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
         ASSERT_EVAL(op1 != NULL);
-        Value *op2 = CALL_EVAL(l->get(3));
+        Value *op2 = args[1];
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
         if (mode->cmp_symbol("lt")) {
@@ -1682,14 +1753,7 @@ struct Default_Evaluator : public IEvaluator {
             cur = cur->next;
           }
         }
-        List * cur  = l->get(3);
-        Value *last = NULL;
-        while (cur != NULL) {
-          last = CALL_EVAL(cur);
-          cur  = cur->next;
-        }
-
-        return last;
+        return eval_args(l->get(3));
       } else if (l->cmp_symbol("quote")) {
         Value *new_val = ALLOC_VAL();
         new_val->list  = l->next;
@@ -1709,15 +1773,13 @@ struct Default_Evaluator : public IEvaluator {
         fprintf(stdout, "%.*s\n", STRF(str->str));
         return NULL;
       } else if (l->cmp_symbol("format")) {
-        //        Value *fmt = CALL_EVAL(l->get(1));
-        //        ASSERT_EVAL(fmt != NULL);
-
-        List * cur  = NULL;
-        Value *fmt  = NULL;
-        List * next = NULL;
-        auto   p    = eval_and_next_arg(l->next);
-        fmt         = p.first;
-        cur         = p.second;
+        // state->symbol_table.dump();
+        SmallArray<Value *, 4> args;
+        args.init();
+        defer({ args.release(); });
+        eval_args_and_collect(l->next, args);
+        Value *fmt    = args[0];
+        u32    cur_id = 1;
         {
           char *      tmp_buf = (char *)tl_alloc_tmp(0x100);
           u32         cursor  = 0;
@@ -1728,15 +1790,11 @@ struct Default_Evaluator : public IEvaluator {
               if (c + 1 == end) {
                 ASSERT_EVAL(false && "[format] Format string ends with %%");
               }
-              if (cur == NULL) {
+              if (cur_id == args.size) {
                 ASSERT_EVAL(false && "[format] Not enough arguments");
               } else {
-                i32  num_chars = 0;
-                auto p         = eval_and_next_arg(cur);
-                CHECK_ERROR();
-                next       = p.second;
-                Value *val = p.first;
-                //              Value *val       = CALL_EVAL(cur);
+                i32    num_chars = 0;
+                Value *val       = args[cur_id];
                 if (c[1] == 'i') {
                   ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::I32);
                   num_chars = sprintf(tmp_buf + cursor, "%i", val->i);
@@ -1757,7 +1815,7 @@ struct Default_Evaluator : public IEvaluator {
                 }
                 cursor += num_chars;
               }
-              cur = next;
+              cur_id += 1;
               c += 1;
             } else {
               tmp_buf[cursor++] = c[0];
@@ -1766,7 +1824,7 @@ struct Default_Evaluator : public IEvaluator {
           }
           tmp_buf[cursor] = '\0';
           Value *new_val  = ALLOC_VAL();
-          new_val->str    = stref_s(tmp_buf);
+          new_val->str    = move_cstr(stref_s(tmp_buf));
           new_val->type   = (i32)Value::Value_t::SYMBOL;
           return new_val;
         }
@@ -1781,7 +1839,9 @@ struct Default_Evaluator : public IEvaluator {
             List *arg_val  = l->next;
             state->symbol_table.enter_scope();
             defer(state->symbol_table.exit_scope());
-            while (arg_name != NULL) { // Bind arguments
+            bool saw_vararg = false;
+            while (arg_name != NULL && arg_name->nonempty()) { // Bind arguments
+              ASSERT_EVAL(!saw_vararg && "vararg must be the last argument");
               ASSERT_EVAL(arg_val != NULL);
               ASSERT_EVAL(arg_name->nonempty());
               if (arg_name->cmp_symbol("...")) {
@@ -1789,6 +1849,7 @@ struct Default_Evaluator : public IEvaluator {
                 new_val->list  = arg_val;
                 new_val->type  = (i32)Value::Value_t::BINDING;
                 state->symbol_table.add_symbol(arg_name->symbol, new_val);
+                saw_vararg = true;
               } else {
                 Value *val = CALL_EVAL(arg_val);
                 state->symbol_table.add_symbol(arg_name->symbol, val);
@@ -1796,13 +1857,7 @@ struct Default_Evaluator : public IEvaluator {
               arg_name = arg_name->next;
               arg_val  = arg_val->next;
             }
-            List * cur  = lambda->next;
-            Value *last = NULL;
-            while (cur != NULL) {
-              last = CALL_EVAL(cur);
-              cur  = cur->next;
-            }
-            return last;
+            return eval_args(lambda->next);
           } else if (sym->type == (i32)Value::Value_t::BINDING) {
             //            Value *val = CALL_EVAL(sym->list);
             Value *val = sym;
@@ -2441,7 +2496,8 @@ struct LLVM_Evaluator : public IEvaluator {
       ASSERT_EVAL(cur_fun == NULL);
       List *func_node   = l;
       List *return_type = func_node->get(1);
-      List *name        = func_node->get(2);
+      Value *name        = CALL_EVAL(func_node->get(2));
+      ASSERT_SMB(name);
       List *args        = func_node->get(3);
       TMP_STORAGE_SCOPE;
       {
@@ -2461,7 +2517,7 @@ struct LLVM_Evaluator : public IEvaluator {
         cur_fun =
             llvm::Function::Create(llvm::FunctionType::get(parse_type(return_type), argv, false),
                                    llvm::Function::LinkageTypes::ExternalLinkage,
-                                   llvm::Twine(stref_to_tmp_cstr(name->symbol)), *module);
+                                   llvm::Twine(llvm::StringRef(name->str.ptr, name->str.len)), *module);
         alloca_bb = llvm::BasicBlock::Create(c, "allocas", cur_fun);
         cur_bb    = alloca_bb;
         llvm_builder.reset(new LLVM_IR_Builder_t(alloca_bb, llvm::NoFolder()));
