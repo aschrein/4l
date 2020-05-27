@@ -38,6 +38,22 @@ char *ll_format(char *buf, char const *fmt, ...) {
   va_end(args);
   return buf;
 }
+void *ll_fopen(char const *name, char const *mode) {
+  FILE *file = fopen(name, mode);
+  return (void *)file;
+}
+void ll_fwrite(void *file, char const *str, uint32_t len) {
+  fwrite(str, 1, (size_t)len, (FILE *)file);
+}
+void ll_fputchar(void *file, uint32_t val) {
+  fwrite((char const*)&val, 1, 1, (FILE *)file);
+}
+void ll_fwrite_line(void *file, char const *str, uint32_t len) {
+  fwrite(str, 1, (size_t)len, (FILE *)file);
+  static char const nl[] = "\n";
+  fwrite(nl, 1, 1, (FILE *)file);
+}
+void ll_fclose(void *file) { fclose((FILE *)file); }
 int  fmt_insert_float(char *buf, int maxlen, float a) { return snprintf(buf, maxlen, "%f", a); }
 int  fmt_insert_int(char *buf, int maxlen, int a) { return snprintf(buf, maxlen, "%i", a); }
 void ll_debug_assert(bool val, char const *str) {
@@ -922,6 +938,7 @@ void tl_free(void *ptr) { free(ptr); }
 struct List {
   string_ref symbol = {};
   u64        id     = 0;
+  bool       quoted = false;
   List *     child  = NULL;
   List *     next   = NULL;
   string_ref get_symbol() {
@@ -1088,6 +1105,10 @@ struct List {
       cur->symbol.len++;
     };
 
+    auto set_quoted = [&]() {
+      cur->quoted = true;
+    };
+
     auto cur_non_empty = [&]() { return cur != NULL && cur->symbol.len != 0; };
     auto cur_has_child = [&]() { return cur != NULL && cur->child != NULL; };
 
@@ -1109,6 +1130,7 @@ struct List {
       }
       case State::SAW_QUOTE: {
         if (cur_non_empty() || cur_has_child()) next_item();
+        set_quoted();
         if (text.ptr[i + 1] == '"' && text.ptr[i + 2] == '"') {
           i += 3;
           while (text.ptr[i + 0] != '"' || //
@@ -1564,8 +1586,8 @@ struct Default_Evaluator : public IEvaluator {
     } else if (l->nonempty()) {
       i32  imm32;
       f32  immf32;
-      bool is_imm32  = parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
-      bool is_immf32 = parse_float(l->symbol.ptr, l->symbol.len, &immf32);
+      bool is_imm32  = !l->quoted && parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
+      bool is_immf32 = !l->quoted && parse_float(l->symbol.ptr, l->symbol.len, &immf32);
       if (is_imm32) {
         Value *new_val = ALLOC_VAL();
         new_val->i     = imm32;
@@ -2571,7 +2593,7 @@ struct LLVM_Evaluator : public IEvaluator {
         CHK_ERR(global_eval(cur));
         cur = cur->next;
       }
-      llvm::StripDebugInfo(*module);
+      //      llvm::StripDebugInfo(*module);
       std::string              str;
       llvm::raw_string_ostream os(str);
       {
@@ -2580,7 +2602,7 @@ struct LLVM_Evaluator : public IEvaluator {
         os.flush();
         dump_file("module.ll", str.c_str(), str.size());
       }
-      {
+      if (0) {
         std::unique_ptr<llvm::legacy::PassManager> FPM =
             std::make_unique<llvm::legacy::PassManager>();
         FPM->add(llvm::createFunctionInliningPass());
@@ -2815,6 +2837,10 @@ struct LLVM_Evaluator : public IEvaluator {
     //      }
     //    }
     else { // no match
+      llvm::Type *ty = parse_type(l);
+      if (ty != NULL) {
+        return wrap_type(ty);
+      }
       if (prev != NULL) {
         return prev->eval(l);
       }
