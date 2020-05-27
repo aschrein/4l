@@ -557,7 +557,7 @@ struct Allocator {
   virtual void *    alloc(size_t)                                     = 0;
   virtual void *    realloc(void *, size_t old_size, size_t new_size) = 0;
   virtual void      free(void *)                                      = 0;
-  static Allocator *get_default() {
+  static Allocator *get_head() {
     struct _Allocator : public Allocator {
       virtual void *alloc(size_t size) override { return tl_alloc(size); }
       virtual void *realloc(void *ptr, size_t old_size, size_t new_size) override {
@@ -1288,7 +1288,7 @@ static inline bool parse_float(char const *str, size_t len, float *result) {
   ASSERT_ANY(res)
 
 struct Value {
-  enum class Value_t : i32 { UNKNOWN = 0, I32, F32, SYMBOL, BINDING, LAMBDA, SCOPE, ANY };
+  enum class Value_t : i32 { UNKNOWN = 0, I32, F32, SYMBOL, BINDING, LAMBDA, SCOPE, MODE, ANY };
   i32 type;
   i32 any_type;
   union {
@@ -1298,7 +1298,7 @@ struct Value {
     List *     list;
     void *     any;
   };
-  void dump() {
+  void ATTR_USED dump() {
     fprintf(stdout, "Value; {\n");
     switch (type) {
     case (i32)Value_t::I32: {
@@ -1331,9 +1331,14 @@ struct Value {
       fprintf(stdout, "  any\n");
       break;
     }
+    case (i32)Value_t::MODE: {
+      fprintf(stdout, "  mod\n");
+      break;
+    }
     default: UNIMPLEMENTED;
     }
     fprintf(stdout, "}\n");
+    fflush(stdout);
   }
 };
 
@@ -1430,9 +1435,9 @@ struct Evaluator_State {
   bool         eval_error = false;
 
   void init() {
-    string_storage = Pool<char>::create((1 << 10));
-    list_storage   = Pool<List>::create((1 << 10));
-    value_storage  = Pool<Value>::create((1 << 10));
+    string_storage = Pool<char>::create((1 << 20));
+    list_storage   = Pool<List>::create((1 << 20));
+    value_storage  = Pool<Value>::create((1 << 20));
     symbol_table.init();
   }
 
@@ -1491,11 +1496,13 @@ struct Match {
 
 struct IEvaluator {
   Evaluator_State *     state        = NULL;
+  IEvaluator *          prev         = NULL;
   virtual Match         eval(List *) = 0;
   virtual void          release()    = 0;
-  static IEvaluator *   get_default();
+  static IEvaluator *   get_head();
+  static void           set_head(IEvaluator *);
   static IEvaluator *   create_mode(string_ref name);
-  static Match          global_eval(List *l) { return get_default()->eval(l); }
+  static Match          global_eval(List *l) { return get_head()->eval(l); }
   Value *               eval_unwrap(List *l) { return global_eval(l).unwrap(); }
   Pair<Value *, List *> eval_and_next_arg(List *l) {
     Value *a = eval_unwrap(l);
@@ -1534,18 +1541,22 @@ struct IEvaluator {
 };
 
 struct Default_Evaluator : public IEvaluator {
-  SmallArray<IEvaluator *, 8> mods;
+  //  SmallArray<IEvaluator *, 8> mods;
 
-  void init() { mods.init(); }
+  void init() {
+    //  mods.init();
+  }
 
-  void  release() override { mods.release(); }
+  void release() override {
+    //  mods.release();
+  }
   Match eval(List *l) override {
     if (l == NULL) return NULL;
-    ito(mods.size) {
-      Match match = mods[i]->eval(l);
-      CHECK_ERROR();
-      if (match.match) return match;
-    }
+    //    ito(mods.size) {
+    //      Match match = mods[i]->eval(l);
+    //      CHECK_ERROR();
+    //      if (match.match) return match;
+    //    }
     TMP_STORAGE_SCOPE;
     if (l->child != NULL) {
       ASSERT_EVAL(!l->nonempty());
@@ -1584,6 +1595,20 @@ struct Default_Evaluator : public IEvaluator {
           eval_args(l->get(4));
         }
         return NULL;
+      } else if (l->cmp_symbol("for-items")) {
+        Value *name = CALL_EVAL(l->next);
+        ASSERT_EVAL(name->type == (i32)Value::Value_t::SYMBOL);
+        SmallArray<Value *, 8> items;
+        items.init();
+        defer(items.release());
+        eval_args_and_collect(l->next->next->child, items);
+        ito(items.size) {
+          state->symbol_table.enter_scope();
+          state->symbol_table.add_symbol(name->str, items[i]);
+          defer(state->symbol_table.exit_scope());
+          eval_args(l->get(3));
+        }
+        return NULL;
       } else if (l->cmp_symbol("if")) {
         EVAL_I32(cond, 1);
         state->symbol_table.enter_scope();
@@ -1601,8 +1626,10 @@ struct Default_Evaluator : public IEvaluator {
         defer(state->symbol_table.exit_scope());
         IEvaluator *mode = IEvaluator::create_mode(name->str);
         ASSERT_EVAL(mode != NULL);
-        mods.push(mode);
+        IEvaluator *old_head = IEvaluator::get_head();
+        IEvaluator::set_head(mode);
         eval_args(l->get(2));
+        IEvaluator::set_head(old_head);
         return NULL;
       } else if (l->cmp_symbol("lambda")) {
         Value *new_val = ALLOC_VAL();
@@ -1636,6 +1663,8 @@ struct Default_Evaluator : public IEvaluator {
         return NULL;
       } else if (l->cmp_symbol("sub")) {
         SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
         eval_args_and_collect(l->next, args);
         ASSERT_EVAL(args.size == 2);
         Value *op1 = args[0];
@@ -1659,6 +1688,8 @@ struct Default_Evaluator : public IEvaluator {
         return NULL;
       } else if (l->cmp_symbol("mul")) {
         SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
         eval_args_and_collect(l->next, args);
         ASSERT_EVAL(args.size == 2);
         Value *op1 = args[0];
@@ -1683,6 +1714,8 @@ struct Default_Evaluator : public IEvaluator {
       } else if (l->cmp_symbol("cmp")) {
         List *                 mode = l->next;
         SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
         eval_args_and_collect(mode->next, args);
         ASSERT_EVAL(args.size == 2);
         Value *op1 = args[0];
@@ -1754,6 +1787,18 @@ struct Default_Evaluator : public IEvaluator {
           }
         }
         return eval_args(l->get(3));
+      } else if (l->cmp_symbol("get-mode")) {
+        Value *new_val = ALLOC_VAL();
+        new_val->any   = get_head();
+        new_val->type  = (i32)Value::Value_t::MODE;
+        return new_val;
+      } else if (l->cmp_symbol("set-mode")) {
+        Value *val = CALL_EVAL(l->get(1));
+        ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::MODE);
+        IEvaluator *old_mode = get_head();
+        set_head((IEvaluator *)val->any);
+        defer(set_head(old_mode););
+        return eval_args(l->get(2));
       } else if (l->cmp_symbol("quote")) {
         Value *new_val = ALLOC_VAL();
         new_val->list  = l->next;
@@ -1766,6 +1811,15 @@ struct Default_Evaluator : public IEvaluator {
         Value *sym = state->symbol_table.lookup_value(l->next->symbol);
         ASSERT_EVAL(sym != NULL && sym->type == (i32)Value::Value_t::BINDING);
         return global_eval(sym->list);
+      } else if (l->cmp_symbol("unquote")) {
+        ASSERT_EVAL(l->next->nonempty());
+        Value *sym = state->symbol_table.lookup_value(l->next->symbol);
+        ASSERT_EVAL(sym != NULL && sym->type == (i32)Value::Value_t::BINDING);
+        ASSERT_EVAL(sym->list->nonempty());
+        Value *new_val = ALLOC_VAL();
+        new_val->str   = sym->list->symbol;
+        new_val->type  = (i32)Value::Value_t::SYMBOL;
+        return new_val;
       } else if (l->cmp_symbol("nil")) {
         return NULL;
       } else if (l->cmp_symbol("print")) {
@@ -1922,23 +1976,28 @@ struct LLVM_Evaluator : public IEvaluator {
   llvm::BasicBlock *                               alloca_bb = NULL;
   std::unique_ptr<llvm::IRBuilder<llvm::NoFolder>> llvm_builder;
   i32                                              target_bits = 64;
+  bool                                             target_avx2 = true;
+
   struct Deferred_Branch {
-    llvm::Value *cond         = NULL;
-    string_ref   true_target  = {};
-    string_ref   false_target = {};
-    llvm::Value *src          = NULL;
+    llvm::Value *     cond         = NULL;
+    string_ref        true_target  = {};
+    string_ref        false_target = {};
+    llvm::BasicBlock *src          = NULL;
   };
   Array<Deferred_Branch>                         deferred_branches;
   Hash_Table<string_ref, llvm::GlobalVariable *> global_strings;
+  Hash_Table<string_ref, llvm::BasicBlock *>     labels;
   //////////////
 
   void init() {
+    labels.init();
     deferred_branches.init();
     global_strings.init();
     struct_type_table = Pool<Struct_Type>::create((1 << 10));
   }
 
   void release() override {
+    labels.release();
     deferred_branches.release();
     global_strings.release();
     context.release();
@@ -1955,6 +2014,7 @@ struct LLVM_Evaluator : public IEvaluator {
         llvm::ConstantDataArray::getString(c, llvm::StringRef(str.ptr, str.len), true);
     llvm::GlobalVariable *msg_glob = new llvm::GlobalVariable(
         *module, msg->getType(), true, llvm::GlobalValue::InternalLinkage, msg);
+    msg_glob->setAlignment(llvm::MaybeAlign(32));
     global_strings.insert(str, msg_glob);
     return llvm_builder->CreateBitCast(msg_glob, llvm::Type::getInt8PtrTy(c));
   }
@@ -2011,16 +2071,15 @@ struct LLVM_Evaluator : public IEvaluator {
       prev = (llvm::Type *)prev_val->any;
     }
     if (prev != NULL) return prev;
-    //    if (l->cmp_symbol("intptr_t")) { // Platform specific
-    //      if (target_bits == 64) {
-    //        return llvm::Type::getInt64Ty(c);
-    //      } else if (target_bits == 32) {
-    //        return llvm::Type::getInt32Ty(c);
-    //      } else {
-    //        UNIMPLEMENTED;
-    //      }
-    //    } else
-    if (l->cmp_symbol("typeof")) {
+    if (l->cmp_symbol("intptr_t")) { // Platform specific
+      if (target_bits == 64) {
+        return llvm::Type::getInt64Ty(c);
+      } else if (target_bits == 32) {
+        return llvm::Type::getInt32Ty(c);
+      } else {
+        UNIMPLEMENTED;
+      }
+    } else if (l->cmp_symbol("typeof")) {
       EVAL_LLVM(val, l->next);
       return val->getType();
     } else if (l->cmp_symbol("i32")) {
@@ -2038,7 +2097,9 @@ struct LLVM_Evaluator : public IEvaluator {
     } else if (l->cmp_symbol("pointer")) {
       return llvm::PointerType::get(parse_type(l->next), 0);
     } else if (l->cmp_symbol("vector")) {
-      return llvm::VectorType::get(parse_type(l->next), parse_int(l->next->next));
+      Value *val = eval_unwrap(l->next->next);
+      CHECK_ERROR();
+      return llvm::VectorType::get(parse_type(l->next), val->i);
     } else if (l->cmp_symbol("array")) {
       return llvm::ArrayType::get(parse_type(l->next), parse_int(l->next->next));
     } else if (l->cmp_symbol("struct")) {
@@ -2190,7 +2251,17 @@ struct LLVM_Evaluator : public IEvaluator {
       else
       BINOP("udiv", CreateUDiv)
       else
+      BINOP("umod", CreateURem)
+      else
       BINOP("umul", CreateNUWMul)
+      else
+      BINOP("and", CreateAnd)
+      else
+      BINOP("or", CreateOr)
+      else
+      BINOP("shl", CreateShl)
+      else
+      BINOP("shr", CreateLShr)
       else
      #undef BINOP
         // clang-format on
@@ -2198,6 +2269,14 @@ struct LLVM_Evaluator : public IEvaluator {
       ASSERT_EVAL(argc == 1);
       EVAL_LLVM(val, argv[0]);
       return wrap_value(llvm_builder->CreateLoad(val));
+    }
+    else if (l->cmp_symbol("ptrtoint")) {
+      ASSERT_EVAL(argc == 1);
+      EVAL_LLVM(val, argv[0]);
+      if (target_bits == 32)
+        return wrap_value(llvm_builder->CreatePtrToInt(val, llvm::Type::getInt32Ty(c)));
+      else
+        return wrap_value(llvm_builder->CreatePtrToInt(val, llvm::Type::getInt64Ty(c)));
     }
     else if (l->cmp_symbol("all")) {
       ASSERT_EVAL(argc == 1);
@@ -2245,7 +2324,11 @@ struct LLVM_Evaluator : public IEvaluator {
       ASSERT_EVAL(argc > 1);
       llvm::SmallVector<llvm::Value *, 4> chain;
       ito(argc - 1) {
-        chain.push_back(llvm_get_constant_i32(parse_int(argv[i + 1])));
+        llvm::Value *val = llvm_eval(argv[i + 1]);
+        ASSERT_EVAL(val != NULL);
+        CHECK_ERROR();
+        chain.push_back(val);
+        //        llvm_get_constant_i32(parse_int(argv[i + 1])));
         CHECK_ERROR();
       }
       EVAL_LLVM(val, argv[0]);
@@ -2310,6 +2393,27 @@ struct LLVM_Evaluator : public IEvaluator {
       llvm::Type *ty = parse_type(argv[1]);
       CHECK_ERROR();
       return wrap_value(llvm_builder->CreateBitCast(val, ty));
+    }
+    else if (l->cmp_symbol("trunc")) {
+      ASSERT_EVAL(argc == 2);
+      EVAL_LLVM(val, argv[0]);
+      llvm::Type *ty = parse_type(argv[1]);
+      CHECK_ERROR();
+      return wrap_value(llvm_builder->CreateTrunc(val, ty));
+    }
+    else if (l->cmp_symbol("sext")) {
+      ASSERT_EVAL(argc == 2);
+      EVAL_LLVM(val, argv[0]);
+      llvm::Type *ty = parse_type(argv[1]);
+      CHECK_ERROR();
+      return wrap_value(llvm_builder->CreateSExt(val, ty));
+    }
+    else if (l->cmp_symbol("zext")) {
+      ASSERT_EVAL(argc == 2);
+      EVAL_LLVM(val, argv[0]);
+      llvm::Type *ty = parse_type(argv[1]);
+      CHECK_ERROR();
+      return wrap_value(llvm_builder->CreateZExt(val, ty));
     }
     else if (l->cmp_symbol("alloca")) {
       ASSERT_EVAL(argc == 1);
@@ -2426,14 +2530,26 @@ struct LLVM_Evaluator : public IEvaluator {
     else if (l->cmp_symbol("assume")) {
       ASSERT_EVAL(argc == 1);
       EVAL_LLVM(val, argv[0]);
-      llvm_builder->CreateIntrinsic(llvm::Intrinsic::assume, {llvm::IntegerType::getInt1Ty(c)},
-                                    {val});
+      //      if (val->getType() == llvm::Type::getInt1Ty(c)) {
+      //        val = llvm_builder->CreateSExt(val, llvm::Type::getInt8Ty(c));
+      //      }
+      llvm_builder->CreateIntrinsic(llvm::Intrinsic::assume, {}, {val});
       return NULL;
     }
     else if (l->cmp_symbol("jmp")) {
-      ASSERT_EVAL(argc > 1);
+      ASSERT_EVAL(argc == 1);
       Deferred_Branch db = {};
       db.true_target     = argv[0]->get_symbol();
+      db.src             = cur_bb;
+      deferred_branches.push(db);
+      return NULL;
+    }
+    else if (l->cmp_symbol("br")) {
+      ASSERT_EVAL(argc == 3);
+      Deferred_Branch db = {};
+      db.cond            = llvm_eval(l->next);
+      db.true_target     = l->get(2)->get_symbol();
+      db.false_target    = l->get(3)->get_symbol();
       db.src             = cur_bb;
       deferred_branches.push(db);
       return NULL;
@@ -2455,14 +2571,106 @@ struct LLVM_Evaluator : public IEvaluator {
         CHK_ERR(global_eval(cur));
         cur = cur->next;
       }
-
       llvm::StripDebugInfo(*module);
       std::string              str;
       llvm::raw_string_ostream os(str);
-      str.clear();
-      module->print(os, NULL);
-      os.flush();
-      dump_file("module.ll", str.c_str(), str.size());
+      {
+        str.clear();
+        module->print(os, NULL);
+        os.flush();
+        dump_file("module.ll", str.c_str(), str.size());
+      }
+      {
+        std::unique_ptr<llvm::legacy::PassManager> FPM =
+            std::make_unique<llvm::legacy::PassManager>();
+        FPM->add(llvm::createFunctionInliningPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createReassociatePass());
+        FPM->add(llvm::createGVNPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createGlobalDCEPass());
+        FPM->add(llvm::createSROAPass());
+        FPM->add(llvm::createEarlyCSEPass());
+        FPM->add(llvm::createReassociatePass());
+        FPM->add(llvm::createConstantPropagationPass());
+        FPM->add(llvm::createDeadInstEliminationPass());
+        FPM->add(llvm::createFunctionInliningPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createPromoteMemoryToRegisterPass());
+        FPM->add(llvm::createAggressiveDCEPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createDeadInstEliminationPass());
+        FPM->add(llvm::createSROAPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createPromoteMemoryToRegisterPass());
+        FPM->add(llvm::createReassociatePass());
+        FPM->add(llvm::createIPConstantPropagationPass());
+        FPM->add(llvm::createDeadArgEliminationPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createPruneEHPass());
+        FPM->add(llvm::createReversePostOrderFunctionAttrsPass());
+        FPM->add(llvm::createConstantPropagationPass());
+        FPM->add(llvm::createDeadInstEliminationPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createArgumentPromotionPass());
+        FPM->add(llvm::createAggressiveDCEPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createJumpThreadingPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createSROAPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createTailCallEliminationPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createEarlyCSEPass());
+        FPM->add(llvm::createFunctionInliningPass());
+        FPM->add(llvm::createConstantPropagationPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createIPSCCPPass());
+        FPM->add(llvm::createDeadArgEliminationPass());
+        FPM->add(llvm::createAggressiveDCEPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createFunctionInliningPass());
+        FPM->add(llvm::createArgumentPromotionPass());
+        FPM->add(llvm::createSROAPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createReassociatePass());
+        FPM->add(llvm::createLoopRotatePass());
+        FPM->add(llvm::createLICMPass());
+        FPM->add(llvm::createLoopUnswitchPass(false));
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createIndVarSimplifyPass());
+        FPM->add(llvm::createLoopIdiomPass());
+        FPM->add(llvm::createLoopDeletionPass());
+        FPM->add(llvm::createLoopUnrollPass());
+        FPM->add(llvm::createGVNPass());
+        FPM->add(llvm::createMemCpyOptPass());
+        FPM->add(llvm::createSCCPPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createJumpThreadingPass());
+        FPM->add(llvm::createCorrelatedValuePropagationPass());
+        FPM->add(llvm::createDeadStoreEliminationPass());
+        FPM->add(llvm::createAggressiveDCEPass());
+        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createInstructionCombiningPass());
+        FPM->add(llvm::createAggressiveInstCombinerPass());
+        FPM->add(llvm::createFunctionInliningPass());
+        FPM->add(llvm::createAggressiveDCEPass());
+        FPM->add(llvm::createStripDeadPrototypesPass());
+        FPM->add(llvm::createGlobalDCEPass());
+        FPM->add(llvm::createGlobalOptimizerPass());
+        FPM->add(llvm::createConstantMergePass());
+        FPM->run(*module);
+      }
+      {
+        str.clear();
+        module->print(os, NULL);
+        os.flush();
+        dump_file("module.opt.ll", str.c_str(), str.size());
+      }
       std::unique_ptr<llvm::orc::LLJIT> jit;
       llvm::ExitOnError                 ExitOnErr;
       llvm::InitializeNativeTarget();
@@ -2482,6 +2690,7 @@ struct LLVM_Evaluator : public IEvaluator {
       jit->getMainJITDylib().addGenerator(
           ExitOnErr(llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
               jit->getDataLayout().getGlobalPrefix())));
+
       auto entry = (int (*)(int, char **))ExitOnErr(jit->lookup("main")).getAddress();
       if (entry != NULL) {
         entry(0, 0);
@@ -2494,11 +2703,11 @@ struct LLVM_Evaluator : public IEvaluator {
       state->symbol_table.enter_scope();
       defer(state->symbol_table.exit_scope());
       ASSERT_EVAL(cur_fun == NULL);
-      List *func_node   = l;
-      List *return_type = func_node->get(1);
+      List * func_node   = l;
+      List * return_type = func_node->get(1);
       Value *name        = CALL_EVAL(func_node->get(2));
       ASSERT_SMB(name);
-      List *args        = func_node->get(3);
+      List *args = func_node->get(3);
       TMP_STORAGE_SCOPE;
       {
         llvm::SmallVector<llvm::Type *, 4> argv;
@@ -2511,13 +2720,12 @@ struct LLVM_Evaluator : public IEvaluator {
           List *arg_name = arg->child->get(1);
           argv.push_back(parse_type(arg_type));
           argv_names.push_back(stref_to_tmp_cstr(arg_name->symbol));
-          //          arg_name->dump();
           arg = arg->next;
         }
-        cur_fun =
-            llvm::Function::Create(llvm::FunctionType::get(parse_type(return_type), argv, false),
-                                   llvm::Function::LinkageTypes::ExternalLinkage,
-                                   llvm::Twine(llvm::StringRef(name->str.ptr, name->str.len)), *module);
+        cur_fun = llvm::Function::Create(
+            llvm::FunctionType::get(parse_type(return_type), argv, false),
+            llvm::Function::LinkageTypes::ExternalLinkage,
+            llvm::Twine(llvm::StringRef(name->str.ptr, name->str.len)), *module);
         alloca_bb = llvm::BasicBlock::Create(c, "allocas", cur_fun);
         cur_bb    = alloca_bb;
         llvm_builder.reset(new LLVM_IR_Builder_t(alloca_bb, llvm::NoFolder()));
@@ -2525,6 +2733,7 @@ struct LLVM_Evaluator : public IEvaluator {
           state->symbol_table.add_symbol(move_cstr(stref_s(argv_names[i].c_str())),
                                          wrap_value(cur_fun->getArg(i)));
         }
+        if (target_avx2) cur_fun->addFnAttr("target-features", "+avx2");
       }
       state->symbol_table.enter_scope();
       defer(state->symbol_table.exit_scope());
@@ -2533,6 +2742,24 @@ struct LLVM_Evaluator : public IEvaluator {
         CHK_ERR(global_eval(cur));
         cur = cur->next;
       }
+      ito(deferred_branches.size) {
+        Deferred_Branch &db = deferred_branches[i];
+        if (db.cond != NULL) { // cond branch
+          ASSERT_EVAL(labels.contains(db.true_target));
+          ASSERT_EVAL(labels.contains(db.false_target));
+          llvm::BasicBlock *true_target  = labels.get(db.true_target);
+          llvm::BasicBlock *false_target = labels.get(db.false_target);
+          llvm::BranchInst::Create(true_target, false_target, db.cond, db.src);
+        } else {
+          ASSERT_EVAL(labels.contains(db.true_target));
+          llvm::BasicBlock *true_target = labels.get(db.true_target);
+          llvm::BranchInst::Create(true_target, db.src);
+        }
+      }
+      deferred_branches.release();
+      deferred_branches.init();
+      labels.release();
+      labels.init();
       cur_fun = NULL;
       return NULL;
     }
@@ -2540,13 +2767,24 @@ struct LLVM_Evaluator : public IEvaluator {
       List *            label_name = l->get(1);
       llvm::BasicBlock *new_bb =
           llvm::BasicBlock::Create(c, stref_to_tmp_cstr(label_name->symbol), cur_fun);
-      state->symbol_table.add_symbol(label_name->symbol, wrap_value(new_bb));
-      if (cur_bb != NULL) {
+      labels.insert(label_name->symbol, new_bb);
+      if (cur_bb == alloca_bb) {
         llvm::BranchInst::Create(new_bb, cur_bb);
       }
       cur_bb = new_bb;
       llvm_builder.reset(new LLVM_IR_Builder_t(cur_bb, llvm::NoFolder()));
       return NULL;
+    }
+    else if (l->cmp_symbol("call")) {
+      List *                              name = l->get(1);
+      llvm::SmallVector<llvm::Value *, 4> argv_values;
+      ito(argc - 1) {
+        EVAL_LLVM(val, argv[1 + i]);
+        argv_values.push_back(val);
+      }
+
+      return wrap_value(llvm_builder->CreateCall(
+          module->getFunction(llvm::StringRef(name->symbol.ptr, name->symbol.len)), argv_values));
     }
     else if (l->cmp_symbol("ret")) {
       if (argc > 0) {
@@ -2577,6 +2815,9 @@ struct LLVM_Evaluator : public IEvaluator {
     //      }
     //    }
     else { // no match
+      if (prev != NULL) {
+        return prev->eval(l);
+      }
       return {NULL, false};
     }
     TRAP;
@@ -2605,28 +2846,33 @@ struct LLVM_Evaluator : public IEvaluator {
 };
 #endif
 
-IEvaluator *IEvaluator::get_default() {
-  static Default_Evaluator *default_eval = NULL;
-  if (default_eval == NULL) {
-    default_eval = new Default_Evaluator();
-    default_eval->init();
+IEvaluator *g_head = NULL;
+
+IEvaluator *IEvaluator::get_head() {
+  if (g_head == NULL) {
+    Default_Evaluator *head = new Default_Evaluator();
+    head->init();
+    g_head = head;
   }
-  return default_eval;
+  return g_head;
 }
+
+void IEvaluator::set_head(IEvaluator *newhead) { g_head = newhead; }
 
 IEvaluator *IEvaluator::create_mode(string_ref name) {
   static LLVM_Evaluator *eval = NULL;
   if (name == stref_s("llvm")) {
     if (eval == NULL) {
       eval        = new LLVM_Evaluator();
-      eval->state = get_default()->state;
+      eval->state = get_head()->state;
+      eval->prev  = get_head();
       eval->init();
     }
     return eval;
   }
   return NULL;
 }
-void global_set_evaluation_error() { IEvaluator::get_default()->set_error(); }
+void global_set_evaluation_error() { IEvaluator::get_head()->set_error(); }
 void parse_and_eval(string_ref text) {
   Evaluator_State state;
   state.init();
@@ -2647,8 +2893,8 @@ void parse_and_eval(string_ref text) {
   }
   root->dump_list_graph();
 
-  IEvaluator::get_default()->state = &state;
-  IEvaluator::get_default()->eval(root);
+  IEvaluator::get_head()->state = &state;
+  IEvaluator::get_head()->eval(root);
 }
 
 int main(int argc, char **argv) {

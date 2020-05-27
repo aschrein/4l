@@ -1,18 +1,14 @@
 (scope
   (let @scope get-scope)
+  (let @mode get-mode)
   (let @format
-    (lambda (fmt ...)
-      (set-scope @scope (fmt ...)
-        (format fmt ...)
+    (lambda (...)
+      (set-mode @mode
+        (format ...)
       )
     )
   )
   (print (@format "--%i--%f--" 666 (add 777.0 0.1)))
-;;  (let @for-range
-;;    (lambda (name start end body)
-;;      (for-range fmt argv)
-;;    )
-;;  )
   (let @add
     (lambda (...)
       (add ...)
@@ -20,40 +16,13 @@
   )
   (print (@format "--%i--%i--" 1 (@add 1 2)))
   (print (@format "--%i--%i--" 1 (@add 2 2)))
-;;  (let print-times
-;;    (lambda (i body)
-;;      (if (cmp lt (unbind i) 1)
-;;        nil
-;;        (scope
-;;          (print (unbind body))
-;;          (print-times (sub (unbind i) 1) (deref body))
-;;        )
-;;      )
-;;    )
-;;  )
-;;  (print-times 10 (format "hello %i" i))
-;;  (print "####################")
-;;  (for-range i 0 10
-;;    (print (format "hello %i" i))
-;;  )
-;;  (let make_vector-f32
-;;    (lambda (x y z w)
-;;      (print (format "make_vector f32 %f %f %f %f" x y z w))
-;;    )
-;;  )
-;;  (let exec-times
-;;    (lambda (i body)
-;;      (if (cmp lt i 1)
-;;        nil
-;;        (scope
-;;          (body)
-;;          (exec-times (sub i 1) (deref body))
-;;        )
-;;      )
-;;    )
-;;  )
-;;  (make_vector-f32 0.0 1.0 2.0 3.0)
-;;  (let @format format)
+  (let @format-name
+    (lambda (l)
+      (set-mode @mode
+        (format (deref l))
+      )
+    )
+  )
   (add-mode llvm
     (let make_vector-f32
       (lambda (x y z w)
@@ -84,26 +53,78 @@
       (lambda (buf vec)
         (puts "{")
         (for-range i 0 N
-          (puts (format buf "%f" (extract_element vec i)))
+          (puts (format buf "%f " (extract_element vec i)))
         )
         (puts "}")
         (putnl)
       )
     )
-    (module
-      (let gen-strcmp
-        (lambda (N)
-          (function i1 (@format (quote "strcmp-%i" N))
-                        (
-                          ((pointer i8) a)
-                          ((pointer i8) b)
-                          ((pointer i8) size)
-                        )
-            (ret (bitcast 0 i1))
+    (let @sub
+      (lambda (...)
+        (set-mode @mode
+          (sub ...)
+        )
+      )
+    )
+    (for-items i ("a" "b" "c" "bye")
+      (print i)
+    )
+    (let @for-items
+      (lambda (name items ...)
+        (set-mode @mode
+          (for-items (unquote name) (items)
+            ...
           )
         )
       )
-      (gen-strcmp 32)
+    )
+    (module
+      (let gen-strcmp
+        (lambda (N)
+          (function i1 (@format-name (quote "strcmp-%i" N))
+                        (
+                          ((pointer i8) a)
+                          ((pointer i8) b)
+                          (i32 size)
+                        )
+            (let N-1 (@sub N 1))
+            (assume (icmp eq (and N (N-1)) 0))
+            (assume (icmp eq (and size N-1) 0))
+            (assume (icmp eq (and (trunc (ptrtoint a) i32) N-1) 0))
+            (assume (icmp eq (and (trunc (ptrtoint b) i32) N-1) 0))
+            (let a (bitcast a (pointer (vector i8 N))))
+            (let b (bitcast b (pointer (vector i8 N))))
+            (let size (udiv size N))
+            (let *i (alloca i32))
+            (store 0 *i)
+            (label loop-header)
+            (let i (load *i))
+            (let end-loop
+              (icmp eq i size)
+            )
+            (br end-loop ret-true cont1)
+            (label cont1)
+            (let fail
+              (not (all (icmp eq (at a i) (at b i))))
+            )
+            (br fail ret-false cont2)
+            (label cont2)
+            (store (iadd i 1) *i)
+            (jmp loop-header)
+            (label ret-true)
+            (ret (trunc 1 i1))
+            (label ret-false)
+            (ret (trunc 0 i1))
+          )
+        )
+      )
+      (let @llvm-mode get-mode)
+      (@for-items (quote i) (quote 4 8 16 32 64)
+        (set-mode @llvm-mode
+          (gen-strcmp i)
+        )
+      )
+
       (function i32 main
                      (
                       (i32 argc)
@@ -117,40 +138,27 @@
         (let *c (alloca (typeof c)))
         (store c *c)
         (let tmp_buf (bitcast (alloca (array i8 256)) (pointer i8)))
+        (puts (format tmp_buf "equal-strings 1: %i"
+          (zext (call strcmp-32
+"first_string0934first_string0934
+first_string0934first_string0934
+first_string0934first_string0934"
+
+"first_string0934first_string0934
+first_string0934first_string0934
+first_string0934first_string0934"
+          64) i32))
+        )(putnl)
+        (puts (format tmp_buf "equal-strings 2: %i"
+          (zext (call strcmp-32 "first_string0934" "first_string1934" 32) i32))
+        )(putnl)
         (for-range i 0 10
           (let c (load *c))
           (let c (fadd c c))
           (store c *c)
           (let N 4)
-;;          (puts "fesffe")
-;;          (puts (format tmp_buf "666 = %f" 666.0))
-;;          (puts tmp_buf)
-;;          (for-range j 0 4
-;;            (puts (format tmp_buf "c[%i] = %f" j (extract_element c j)))
-;;          )
-            ;; (print-float4 tmp_buf c)
-            (print-vector tmp_buf c)
-;;          (debug_assert (fcmp eq (extract_element c 0) (2.0)))
+          (print-vector tmp_buf c)
         )
-        ;; (exec-times 10 (quote (debug_assert (fcmp eq (extract_element c 0) (2.0)))))
-        ;; (debug_assert (fcmp eq (extract_element c 1) (4.0)))
-        ;; (debug_assert (fcmp eq (extract_element c 2) (6.0)))
-        ;; (debug_assert (fcmp eq (extract_element c 3) (8.0)))
-        ;; ; Test vector logic ops
-        ;; (debug_assert (all (fcmp eq c (make_vector f32 2.0 4.0 6.0 8.0))))
-        ;; (debug_assert (any (fcmp eq c (make_vector f32 0.0 4.0 0.0 0.0))))
-        ;; (debug_assert (none (fcmp eq c (make_vector f32 2.1 4.1 6.1 8.1))))
-        ;; ; Test negation
-        ;; (debug_assert (not (all (fcmp eq c (make_vector f32 2.0 4.0 6.0 8.1)))))
-        ;; (debug_assert (not (any (fcmp eq c (make_vector f32 0.0 0.0 0.0 0.0)))))
-        ;; (debug_assert (not (none (fcmp eq c (make_vector f32 0.0 0.0 6.0 0.0)))))
-        ;; ; Test store/load
-        ;; (let tmp_ptr (alloca (vector f32 4)))
-        ;; (store c tmp_ptr)
-        ;; (debug_assert (all (fcmp eq c (load tmp_ptr))))
-        ;; (printf "hello world!")
-        ;; (debug_assert (icmp eq 1 1))
-        ;; (debug_assert (icmp eq 0 1))
         (ret 0)
       )
     )
