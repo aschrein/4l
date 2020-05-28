@@ -45,9 +45,7 @@ void *ll_fopen(char const *name, char const *mode) {
 void ll_fwrite(void *file, char const *str, uint32_t len) {
   fwrite(str, 1, (size_t)len, (FILE *)file);
 }
-void ll_fputchar(void *file, uint32_t val) {
-  fwrite((char const*)&val, 1, 1, (FILE *)file);
-}
+void ll_fputchar(void *file, uint32_t val) { fwrite((char const *)&val, 1, 1, (FILE *)file); }
 void ll_fwrite_line(void *file, char const *str, uint32_t len) {
   fwrite(str, 1, (size_t)len, (FILE *)file);
   static char const nl[] = "\n";
@@ -1105,9 +1103,7 @@ struct List {
       cur->symbol.len++;
     };
 
-    auto set_quoted = [&]() {
-      cur->quoted = true;
-    };
+    auto set_quoted = [&]() { cur->quoted = true; };
 
     auto cur_non_empty = [&]() { return cur != NULL && cur->symbol.len != 0; };
     auto cur_has_child = [&]() { return cur != NULL && cur->child != NULL; };
@@ -2048,7 +2044,7 @@ struct LLVM_Evaluator : public IEvaluator {
   };
   Pool<Struct_Type> struct_type_table;
   void              add_struct(Struct_Type struct_ty) { struct_type_table.push(struct_ty); }
-  u32               lookup_struct_member(llvm::Type *ty, string_ref member_name) {
+  i32               lookup_struct_member(llvm::Type *ty, string_ref member_name) {
     ito(struct_type_table.cursor) {
       u32 index = struct_type_table.cursor - 1 - i;
       if (struct_type_table.at(index)->ty == ty) {
@@ -2104,6 +2100,8 @@ struct LLVM_Evaluator : public IEvaluator {
     } else if (l->cmp_symbol("typeof")) {
       EVAL_LLVM(val, l->next);
       return val->getType();
+    } else if (l->cmp_symbol("void")) {
+      return llvm::Type::getVoidTy(c);
     } else if (l->cmp_symbol("i32")) {
       return llvm::Type::getInt32Ty(c);
     } else if (l->cmp_symbol("i64")) {
@@ -2360,11 +2358,44 @@ struct LLVM_Evaluator : public IEvaluator {
       ASSERT_EVAL(argc > 1);
       llvm::SmallVector<llvm::Value *, 4> chain;
       ito(argc - 1) {
-        chain.push_back(llvm_get_constant_i32(parse_int(argv[i + 1])));
+//        i32   id;
+        List *arg = argv[i + 1];
+//        if (parse_decimal_int(arg->symbol.ptr, arg->symbol.len, &id)) {
+//          chain.push_back(llvm_get_constant_i32(id));
+//        } else {
+//          ASSERT_EVAL(false && "GEP must be an integer");
+//        }
+        llvm::Value *id = llvm_eval(arg);
+        chain.push_back(id);
         CHECK_ERROR();
       }
       EVAL_LLVM(val, argv[0]);
       return wrap_value(llvm_builder->CreateGEP(val, chain));
+    }
+    else if (l->cmp_symbol("get_member_id")) {
+      ASSERT_EVAL(argc == 2);
+      Value *ty = CALL_EVAL(argv[0]);
+      ASSERT_ALWAYS(ty->type == (i32)Value::Value_t::ANY);
+      ASSERT_ALWAYS(ty->any_type == (i32)LLVM_Value_t::TYPE);
+      u32    member_id = lookup_struct_member((llvm::Type *)ty->any, argv[1]->symbol);
+      Value *new_val   = ALLOC_VAL();
+      new_val->i       = member_id;
+      new_val->type    = (i32)Value::Value_t::I32;
+      return new_val;
+    }
+    else if (l->cmp_symbol("mgep")) {
+      ASSERT_EVAL(argc == 2);
+      Value *ty = CALL_EVAL(argv[0]);
+      ASSERT_EVAL(ty->type == (i32)Value::Value_t::ANY);
+      ASSERT_EVAL(ty->any_type == (i32)LLVM_Value_t::VALUE);
+      llvm::Value *ptr = (llvm::Value *)ty->any;
+      llvm::PointerType *ptr_ty = llvm::dyn_cast<llvm::PointerType>(ptr->getType());
+      ASSERT_EVAL(ptr_ty != NULL);
+      llvm::Type *pointee_ty = ptr_ty->getPointerElementType();
+      i32 member_id = lookup_struct_member(pointee_ty, argv[1]->symbol);
+      ASSERT_EVAL(member_id >= 0);
+      return wrap_value(llvm_builder->CreateGEP(
+          (llvm::Value *)ty->any, {llvm_get_constant_i32(0), llvm_get_constant_i32(member_id)}));
     }
     else if (l->cmp_symbol("extract_element")) {
       ASSERT_EVAL(argc > 1);
@@ -2524,14 +2555,16 @@ struct LLVM_Evaluator : public IEvaluator {
       }
       return wrap_value(llvm_builder->CreateCall(module->getFunction("ll_format"), argv_values));
     }
-    else if (l->cmp_symbol("puts")) {
+    else if (l->cmp_symbol("print")) {
       ASSERT_EVAL(argc == 1);
       EVAL_LLVM(val, argv[0]);
       llvm_builder->CreateCall(module->getFunction("ll_puts"), {val});
       return NULL;
     }
-    else if (l->cmp_symbol("putnl")) {
-      ASSERT_EVAL(argc == 0);
+    else if (l->cmp_symbol("println")) {
+      ASSERT_EVAL(argc == 1);
+      EVAL_LLVM(val, argv[0]);
+      llvm_builder->CreateCall(module->getFunction("ll_puts"), {val});
       llvm_builder->CreateCall(module->getFunction("ll_puts"), {lookup_string(stref_s("\n"))});
       return NULL;
     }
