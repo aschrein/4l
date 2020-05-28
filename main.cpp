@@ -1522,34 +1522,40 @@ struct IEvaluator {
   static IEvaluator *   create_mode(string_ref name);
   static Match          global_eval(List *l) { return get_head()->eval(l); }
   Value *               eval_unwrap(List *l) { return global_eval(l).unwrap(); }
-  Pair<Value *, List *> eval_and_next_arg(List *l) {
-    Value *a = eval_unwrap(l);
-    if (a != NULL && a->type == (i32)Value::Value_t::BINDING) {
-      List *next = l->next;
-      if (next == NULL) next = a->list->next;
-      a = eval_unwrap(a->list);
-      return make_pair(a, next);
-    } else {
-      return make_pair(a, l->next);
-    }
-  }
+//  Pair<Value *, List *> eval_and_next_arg(List *l) {
+//    Value *a = eval_unwrap(l);
+//    if (a != NULL && a->type == (i32)Value::Value_t::BINDING) {
+//      List *next = l->next;
+//      if (next == NULL) next = a->list->next;
+//      a = eval_unwrap(a->list);
+//      return make_pair(a, next);
+//    } else {
+//      return make_pair(a, l->next);
+//    }
+//  }
   Value *eval_args(List *arg) {
     List * cur  = arg;
     Value *last = NULL;
     while (cur != NULL) {
-      auto p = eval_and_next_arg(cur);
-      cur    = p.second;
-      last   = p.first;
+      Value *a = eval_unwrap(cur);
+      if (a != NULL && a->type == (i32)Value::Value_t::BINDING) {
+        a = eval_args(a->list);
+      }
+      cur    = cur->next;
+      last   = a;
     }
     return last;
   }
   template <typename V> void eval_args_and_collect(List *l, V &values) {
-    while (true) {
-      auto   p = eval_and_next_arg(l);
-      Value *a = p.first;
-      values.push(a);
-      l = p.second;
-      if (l == NULL) break;
+    List * cur  = l;
+    while (cur != NULL) {
+      Value *a = eval_unwrap(cur);
+      if (a != NULL && a->type == (i32)Value::Value_t::BINDING) {
+        eval_args_and_collect(a->list, values);
+      } else {
+        values.push(a);
+      }
+      cur    = cur->next;
     }
   }
   Value *    alloc_value() { return state->alloc_value(); }
@@ -1659,10 +1665,14 @@ struct Default_Evaluator : public IEvaluator {
         defer(state->symbol_table.exit_scope());
         return eval_args(l->next);
       } else if (l->cmp_symbol("add")) {
-        auto   p   = eval_and_next_arg(l->get(1));
-        Value *op1 = p.first;
+        SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
+        eval_args_and_collect(l->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
         ASSERT_EVAL(op1 != NULL);
-        Value *op2 = CALL_EVAL(p.second);
+        Value *op2 = args[1];
         ASSERT_EVAL(op2 != NULL);
         ASSERT_EVAL(op1->type == op2->type);
         if (op1->type == (i32)Value::Value_t::I32) {
